@@ -1,0 +1,40 @@
+SPECIFIC ATOMICS INC.
+SA-COMM-4 Communications Payload — Bus Interface Notes
+Document: SAI-INT-NOTES-2025 | Author: Systems Integration Team
+
+---
+
+These notes supplement the formal SA-COMM-4 ICD (SAI-ICD-2025-004) and capture
+informal interface guidance from coordination meetings with the bus controller team.
+
+BUS PROTOCOL
+The SA-COMM-4 uses MIL-STD-1553B. No deviations from standard.
+RT address assigned: 07 (pending final confirmation from bus controller team).
+
+MESSAGE RATE NOTE
+Our payload runs at 50Hz. We have heard that another contractor on this bus
+may be operating at a higher rate. This needs to be resolved at the system level.
+Operating the SA-COMM-4 above 50Hz is not supported and has not been tested.
+
+CONNECTOR
+MIL-DTL-38999 Series III. Same as platform standard. No issues expected.
+
+ERROR HANDLING
+We use parity bit checking. Some systems use CRC. Government bus controller
+team should confirm which error detection scheme will be enforced at the bus level
+as there may be a mismatch with other payloads.
+
+VOLTAGE
+We are rated for +/-5% tolerance. This is wider than some payloads.
+If the bus controller enforces a tighter spec, we need to be notified.
+
+OPEN ITEMS (as of last coordination meeting)
+- Data refresh timeout: not yet defined for SA-COMM-4. Awaiting government guidance.
+- Encryption: SA-COMM-4 does not currently specify an encryption standard for 1553B
+  traffic. If the bus requires encrypted data words, this is a new requirement that
+  will need to go through our formal change process.
+- Word length: assumed 16-bit per MIL-STD-1553B but not formally captured in our ICD.
+  Will address in next revision.
+
+CONTACT
+Systems Integration: systems@specific-atomics.com

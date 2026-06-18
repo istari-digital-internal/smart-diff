@@ -1,0 +1,1 @@
+These are Interface Control Documents (ICDs) from two contractors. Warthrop is Company A with a sensor payload and Specific Atomics is Company B with a comms payload. Both are integrating into a government-owned MIL-STD-1553B bus. Neither contractor can share data directly with the other or with the government.

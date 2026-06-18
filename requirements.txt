@@ -1,0 +1,7 @@
+python-dotenv
+openai
+google-generativeai
+anthropic
+pdfplumber
+openpyxl
+python-docx

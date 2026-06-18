@@ -1,0 +1,7 @@
+.env
+diff_output.html
+diff_output_prompt.txt
+prompt_used.txt
+__pycache__/
+*.pyc
+.DS_Store
