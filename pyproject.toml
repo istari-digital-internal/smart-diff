@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "smart-diff"
+version = "1.0.0"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11,<3.13"
+dotenv = "*"
+requests = "2.32.4"
+poethepoet = "0.37.0"
+pyinstaller = "6.16.0"
+openai = "*"
+claude = "*"
+openpyxl = "*"
+pdfplumber = "*"
+python-docx = "*"
+
+[tool.poe.tasks]
+build = "pyinstaller --clean --onefile --add-data system_prompt.txt:. --add-data html/report_template.html:html --name=smart_diff smart_diff.py"
