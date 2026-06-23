@@ -63,7 +63,7 @@ def main():
 
     # CLI arguments
     ap = argparse.ArgumentParser()
-    ap.add_argument('--prompt-file', required=True)                   # path to static prompt .txt/.docx file
+    ap.add_argument('--prompt', required=True)                        # Textual prompt
     ap.add_argument('--diff-file1',  required=True)                   # Company A ICD
     ap.add_argument('--diff-file2',  required=True)                   # Company B ICD
     ap.add_argument('--auth-tok',    default=None)                    # LLM API key (overrides .env)
@@ -90,7 +90,7 @@ def main():
 
     # Read inputs
     system    = (Path(__file__).parent / 'system_prompt.txt').read_text().strip()
-    prompt    = Path(args.prompt_file).read_text().strip()
+    prompt    = args.prompt
     filename1, filename2 = Path(args.diff_file1).name, Path(args.diff_file2).name  # filenames used as report labels
     uuid1, rev1 = (args.file1_uuid or ''), (args.file1_rev or '')  # Istari artifact UUID and revision for Company A
     uuid2, rev2 = (args.file2_uuid or ''), (args.file2_rev or '')  # Istari artifact UUID and revision for Company B
