@@ -90,7 +90,7 @@ def main():
 
     # Read inputs
     system    = (Path(__file__).parent / 'system_prompt.txt').read_text().strip()
-    prompt    = args.prompt
+    prompt    = args.prompt.strip()
     filename1, filename2 = Path(args.diff_file1).name, Path(args.diff_file2).name  # filenames used as report labels
     uuid1, rev1 = (args.file1_uuid or ''), (args.file1_rev or '')  # Istari artifact UUID and revision for Company A
     uuid2, rev2 = (args.file2_uuid or ''), (args.file2_rev or '')  # Istari artifact UUID and revision for Company B
