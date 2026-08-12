@@ -1,104 +1,207 @@
-import argparse, os, json
+"""Smart Diff: AI comparison of two extracted document artifacts.
+
+Reads two plain-text inputs (products of platform extraction jobs), sends them
+with a fixed system prompt to an approved LLM endpoint over HTTPS, and writes
+an HTML comparison report plus a plain-text audit file.
+
+Runtime dependencies: python-dotenv, requests, and the standard library only.
+No LLM vendor SDKs and no AWS SDK. Providers:
+
+  bedrock        AWS Bedrock Converse API (GovCloud/FIPS endpoint).
+                 Auth: bearer API key, or AWS SigV4 signed with stdlib hmac.
+  openai_compat  Any OpenAI-compatible chat completions endpoint.
+                 Auth: bearer API key.
+"""
+
+import argparse
+import datetime
+import hashlib
+import hmac
+import json
+import os
+import re
+import sys
+import urllib.parse
 from pathlib import Path
 from string import Template
-from datetime import datetime
-from dotenv import load_dotenv
 
-# ── .env configuration ────────────────────────────────────────────────────────
-# Settings and API keys are read from the .env file in the same directory.
-#
-#   LLM_PROVIDER   = openai | gemini | claude      (which backend to use)
-#   OPENAI_API_KEY = sk-...                         (required if provider=openai)
-#   GEMINI_API_KEY = ...                            (required if provider=gemini)
-#   CLAUDE_API_KEY = ...                            (required if provider=claude)
-#   OPENAI_MODEL   = gpt-4o                         (optional — shown above is default)
-#   GEMINI_MODEL   = gemini-1.5-pro                 (optional — shown above is default)
-#   CLAUDE_MODEL   = claude-opus-4-8                (optional — shown above is default)
-#
-# CLI flags --provider and --auth-tok override .env values if provided.
-# ─────────────────────────────────────────────────────────────────────────────
+from dotenv import load_dotenv
+import requests
+
+REQUIRED_KEYS = ("matches", "conflicts", "missing", "recommendation")
+REQUEST_TIMEOUT_S = 300
+
 
 def read_file(p):
-    # Extracts plain text from PDF, XLSX, DOCX, or any plain-text file.
-    ext = Path(p).suffix.lower()
-    if ext == '.pdf':
-        import pdfplumber
-        return '\n'.join(pg.extract_text() or '' for pg in pdfplumber.open(p).pages)
-    if ext == '.xlsx':
-        import openpyxl
-        wb = openpyxl.load_workbook(p, data_only=True)          # data_only=True returns cell values, not formulas
-        return '\n'.join('  |  '.join(str(c) for c in row if c is not None)
-                         for ws in wb.worksheets for row in ws.iter_rows(values_only=True))
-    if ext == '.docx':
-        from docx import Document
-        return '\n'.join(para.text for para in Document(p).paragraphs if para.text.strip())
-    return Path(p).read_text(errors='replace')                  # fallback: plain text (.txt, .csv, etc.)
+    # Inputs are extraction products (plain text, HTML, or JSON exports).
+    return Path(p).read_text(errors="replace")
+
+
+def strip_json_fences(text):
+    text = text.strip()
+    fenced = re.match(r"^```(?:json)?\s*([\s\S]*?)```\s*$", text, re.IGNORECASE)
+    return fenced.group(1).strip() if fenced else text
+
+
+def parse_diff(raw):
+    diff = json.loads(strip_json_fences(raw))
+    for key in REQUIRED_KEYS:
+        if key not in diff:
+            raise ValueError(f"LLM response missing required key: {key!r}")
+    return diff
+
+
+# ── SigV4 signing (stdlib only) ──────────────────────────────────────────────
+
+def _sign(key, msg):
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def sigv4_headers(method, url, region, service, payload, access_key, secret_key, session_token=None):
+    # AWS Signature Version 4 for a single POST request.
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc
+    canonical_uri = urllib.parse.quote(parsed.path or "/")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+    payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    headers = {"host": host, "x-amz-date": amz_date, "x-amz-content-sha256": payload_hash}
+    if session_token:
+        headers["x-amz-security-token"] = session_token
+    signed_names = ";".join(sorted(headers))
+    canonical_headers = "".join(f"{k}:{headers[k]}\n" for k in sorted(headers))
+
+    canonical_request = "\n".join(
+        [method, canonical_uri, "", canonical_headers, signed_names, payload_hash]
+    )
+    scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = "\n".join(
+        ["AWS4-HMAC-SHA256", amz_date, scope,
+         hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()]
+    )
+    k_date = _sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
+    k_region = _sign(k_date, region)
+    k_service = _sign(k_region, service)
+    k_signing = _sign(k_service, "aws4_request")
+    signature = hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    out = {
+        "X-Amz-Date": amz_date,
+        "X-Amz-Content-Sha256": payload_hash,
+        "Authorization": (
+            f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, "
+            f"SignedHeaders={signed_names}, Signature={signature}"
+        ),
+    }
+    if session_token:
+        out["X-Amz-Security-Token"] = session_token
+    return out
+
+
+# ── Providers ────────────────────────────────────────────────────────────────
+
+def call_bedrock(token, model, system, msg):
+    # Converse API: one request shape regardless of the underlying model.
+    region = os.getenv("BEDROCK_REGION", "us-gov-west-1")
+    endpoint = os.getenv(
+        "BEDROCK_ENDPOINT", f"https://bedrock-runtime.{region}.amazonaws.com"
+    ).rstrip("/")
+    url = f"{endpoint}/model/{urllib.parse.quote(model, safe='')}/converse"
+    payload = json.dumps({
+        "system": [{"text": system}],
+        "messages": [{"role": "user", "content": [{"text": msg}]}],
+        "inferenceConfig": {"temperature": 0, "maxTokens": 8192},
+    })
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    access_key = os.getenv("AWS_ACCESS_KEY_ID", "")
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    elif access_key and secret_key:
+        headers.update(sigv4_headers(
+            "POST", url, region, "bedrock", payload, access_key, secret_key,
+            os.getenv("AWS_SESSION_TOKEN") or None,
+        ))
+    else:
+        raise RuntimeError("Bedrock auth missing: provide --auth-tok or AWS credentials")
+
+    resp = requests.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT_S)
+    resp.raise_for_status()
+    blocks = resp.json()["output"]["message"]["content"]
+    return "".join(b.get("text", "") for b in blocks)
+
+
+def call_openai_compat(token, model, system, msg):
+    # Any endpoint speaking the chat completions contract.
+    base = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    payload = json.dumps({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": msg},
+        ],
+    })
+    resp = requests.post(
+        f"{base}/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        timeout=REQUEST_TIMEOUT_S,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+PROVIDERS = {
+    "bedrock": (call_bedrock, "BEDROCK_MODEL_ID"),
+    "openai_compat": (call_openai_compat, "LLM_MODEL"),
+}
+
 
 def call_llm(provider, token, model, system, msg):
-    # Calls the chosen LLM and returns the response text.
-    # provider = set by --provider CLI arg or LLM_PROVIDER in .env  (e.g. 'openai', 'gemini', 'claude')
-    # token    = set by --auth-tok CLI arg or OPENAI_API_KEY / GEMINI_API_KEY / CLAUDE_API_KEY in .env
-    # model    = set by OPENAI_MODEL / GEMINI_MODEL / CLAUDE_MODEL in .env (defaults: gpt-4o, gemini-1.5-pro, claude-opus-4-8)
-    # system   = standing instructions loaded from system_prompt.txt
-    # msg      = user prompt — the two file contents + user's focus for this specific run
-    if provider == 'openai':
-        from openai import OpenAI
-        return OpenAI(api_key=token).chat.completions.create(
-            model=model,
-            messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': msg}]
-        ).choices[0].message.content
-    if provider == 'gemini':
-        import google.generativeai as genai
-        genai.configure(api_key=token)                          # key must be set before model init
-        return genai.GenerativeModel(model, system_instruction=system).generate_content(msg).text
-    if provider == 'claude':
-        import anthropic
-        return anthropic.Anthropic(api_key=token).messages.create(
-            model=model, max_tokens=4096, system=system,
-            messages=[{'role': 'user', 'content': msg}]
-        ).content[0].text
+    fn, _ = PROVIDERS[provider]
+    return fn(token, model, system, msg)
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     load_dotenv()
 
-    # CLI arguments
     ap = argparse.ArgumentParser()
-    ap.add_argument('--prompt', required=True)                        # Textual prompt
-    ap.add_argument('--diff-file1',  required=True)                   # Company A ICD
-    ap.add_argument('--diff-file2',  required=True)                   # Company B ICD
-    ap.add_argument('--auth-tok',    default=None)                    # LLM API key (overrides .env)
-    ap.add_argument('--provider',    default=None)                    # openai | gemini | claude (overrides .env)
-    ap.add_argument('--file1-uuid',  default=None)                    # Istari artifact UUID for Company A
-    ap.add_argument('--file1-rev',   default=None)                    # Istari revision ID for Company A
-    ap.add_argument('--file2-uuid',  default=None)                    # Istari artifact UUID for Company B
-    ap.add_argument('--file2-rev',   default=None)                    # Istari revision ID for Company B
-    ap.add_argument('--output',      default='diff_output.html')      # output HTML filename
+    ap.add_argument("--prompt", required=True)                    # user focus text
+    ap.add_argument("--diff-file1", required=True)                # extracted artifact A
+    ap.add_argument("--diff-file2", required=True)                # extracted artifact B
+    ap.add_argument("--auth-tok", default=None)                   # LLM API key/token
+    ap.add_argument("--provider", default=None)                   # bedrock | openai_compat
+    ap.add_argument("--file1-uuid", default=None)
+    ap.add_argument("--file1-rev", default=None)
+    ap.add_argument("--file2-uuid", default=None)
+    ap.add_argument("--file2-rev", default=None)
+    ap.add_argument("--output", default="diff_output.html")
     args = ap.parse_args()
 
-    # probably better ways to do this but i think this works for now gerhard lmk what you think
-    # single dict maps provider name to its .env key and default model
-    # required in .env: whichever API key matches your provider (e.g. OPENAI_API_KEY if using openai)
-    # optional in .env: LLM_PROVIDER (defaults to openai), OPENAI_MODEL, GEMINI_MODEL, CLAUDE_MODEL
-    PROVIDERS = {
-        'openai': ('OPENAI_API_KEY', os.getenv('OPENAI_MODEL', 'gpt-4o')),         # .env: OPENAI_MODEL
-        'gemini': ('GEMINI_API_KEY', os.getenv('GEMINI_MODEL', 'gemini-1.5-pro')), # .env: GEMINI_MODEL
-        'claude': ('CLAUDE_API_KEY', os.getenv('CLAUDE_MODEL', 'claude-opus-4-8')),# .env: CLAUDE_MODEL
-    }
-    provider       = args.provider or os.getenv('LLM_PROVIDER', 'openai')  # .env: LLM_PROVIDER
-    env_key, model = PROVIDERS[provider]                                    # unpack key name + model for chosen provider
-    token          = args.auth_tok or os.getenv(env_key, '')                # .env: OPENAI_API_KEY / GEMINI_API_KEY / CLAUDE_API_KEY
+    provider = args.provider or os.getenv("LLM_PROVIDER", "bedrock")
+    if provider not in PROVIDERS:
+        raise SystemExit(f"Unknown provider {provider!r}; expected one of {sorted(PROVIDERS)}")
+    _, model_env = PROVIDERS[provider]
+    model = os.getenv(model_env, "")
+    if not model:
+        raise SystemExit(f"Set {model_env} in the environment or .env")
+    token = args.auth_tok or os.getenv("LLM_AUTH_TOKEN", "")
 
-    # Read inputs
-    system    = (Path(__file__).parent / 'system_prompt.txt').read_text().strip()
-    prompt    = args.prompt.strip()
-    filename1, filename2 = Path(args.diff_file1).name, Path(args.diff_file2).name  # filenames used as report labels
-    uuid1, rev1 = (args.file1_uuid or ''), (args.file1_rev or '')  # Istari artifact UUID and revision for Company A
-    uuid2, rev2 = (args.file2_uuid or ''), (args.file2_rev or '')  # Istari artifact UUID and revision for Company B
-    f1, f2    = read_file(args.diff_file1), read_file(args.diff_file2)
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    system = (Path(__file__).parent / "system_prompt.txt").read_text().strip()
+    prompt = args.prompt.strip()
+    filename1, filename2 = Path(args.diff_file1).name, Path(args.diff_file2).name
+    uuid1, rev1 = (args.file1_uuid or ""), (args.file1_rev or "")
+    uuid2, rev2 = (args.file2_uuid or ""), (args.file2_rev or "")
+    f1, f2 = read_file(args.diff_file1), read_file(args.diff_file2)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # send both files + the user's focus to the LLM
-    raw  = call_llm(provider, token, model, system, f"""Return ONLY valid JSON in this exact format:
+    msg = f"""Return ONLY valid JSON in this exact format:
 {{"matches":["..."],"conflicts":[{{"item":"","value1":"","value2":""}}],"missing":[{{"item":"","missing_from":"","detail":""}}],"recommendation":"..."}}
 
 User focus: {prompt}
@@ -107,44 +210,41 @@ User focus: {prompt}
 {f1}
 
 --- Document 2 | {filename2} | UUID: {uuid2} | Revision: {rev2} ---
-{f2}""")
-    diff = json.loads(raw.strip().lstrip('`json\n').rstrip('`'))  # strip backticks the LLM sometimes adds around JSON
+{f2}"""
 
-    # Build HTML report and write both output files
+    raw = call_llm(provider, token, model, system, msg)
+    try:
+        diff = parse_diff(raw)
+    except (ValueError, json.JSONDecodeError):
+        # One retry; a second malformed response fails the job cleanly.
+        raw = call_llm(provider, token, model, system, msg)
+        diff = parse_diff(raw)
+
     out = Path(args.output)
     out.write_text(Template(
-        (Path(__file__).parent / 'html' / 'report_template.html')
+        (Path(__file__).parent / "html" / "report_template.html")
         .read_text()).substitute(
         filename1=filename1, filename2=filename2,
         uuid1=uuid1, rev1=rev1, uuid2=uuid2, rev2=rev2,
         provider=provider, model=model, timestamp=timestamp,
-        matches_html  = ''.join(f'<li>{m}</li>' for m in diff['matches']),
-        conflicts_html= ''.join(
-                        f'<tr style="border-bottom:1px solid #ddd">'
-                        f'<td style="padding:8px">{c["item"]}</td>'
-                        f'<td style="padding:8px">{c["value1"]}</td>'
-                        f'<td style="padding:8px">{c["value2"]}</td></tr>'
-                        for c in diff['conflicts']),
-        missing_html  = ''.join(
-                        f'<li><b>{m["missing_from"]}</b> did not specify {m["item"]}. {m.get("detail","")}</li>'
-                        for m in diff['missing']),
-        recommendation= diff['recommendation'],
+        matches_html=''.join(f'<li>{m}</li>' for m in diff['matches']),
+        conflicts_html=''.join(
+            f'<tr style="border-bottom:1px solid #ddd">'
+            f'<td style="padding:8px">{c["item"]}</td>'
+            f'<td style="padding:8px">{c["value1"]}</td>'
+            f'<td style="padding:8px">{c["value2"]}</td></tr>'
+            for c in diff['conflicts']),
+        missing_html=''.join(
+            f'<li><b>{m["missing_from"]}</b> did not specify {m["item"]}. {m.get("detail", "")}</li>'
+            for m in diff['missing']),
+        recommendation=diff['recommendation'],
     ))
-    Path(out.stem + '_prompt.txt').write_text(f'PROMPT\n{"="*40}\n{prompt}\n\nPROVIDER: {provider}\nMODEL: {model}\n')
-    print(f'Done — {out} + {out.stem}_prompt.txt')
+    Path(out.stem + "_prompt.txt").write_text(
+        f'PROMPT\n{"=" * 40}\n{prompt}\n\nPROVIDER: {provider}\nMODEL: {model}\n'
+    )
+    print(f"Done — {out} + {out.stem}_prompt.txt")
+    return 0
 
-    # i am not as familiar with building html from python, comments below are for my own self awareness and can be deleted
-    # out = Path(args.output)                          — sets the output file path from the --output arg
-    # Template(...).read_text()                        — loads report_template.html from the html/ folder next to this script
-    # .substitute(...)                                 — swaps every $placeholder in the template with real data
-    # filename1/filename2                              — the two filenames shown in the source of truth trace box at the top
-    # uuid1/rev1/uuid2/rev2                            — the istari artifact UUIDs and revision IDs for traceability
-    # provider/model/timestamp                         — which llm ran the diff and when it ran
-    # matches_html                                     — builds a <li> bullet for each match the llm found
-    # conflicts_html                                   — builds a <tr> table row for each conflict: item / value from file1 / value from file2
-    # missing_html                                     — builds a <li> bullet for each item one doc is missing
-    # recommendation                                   — drops the llm recommendation in as plain text
-    # Path(out.stem + '_prompt.txt').write_text(...)   — writes a second file next to the html with the prompt + model used as an audit trail
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    sys.exit(main())
