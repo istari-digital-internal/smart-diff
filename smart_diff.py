@@ -66,7 +66,8 @@ def main():
     ap.add_argument('--prompt', required=True)                        # Textual prompt
     ap.add_argument('--diff-file1',  required=True)                   # Company A ICD
     ap.add_argument('--diff-file2',  required=True)                   # Company B ICD
-    ap.add_argument('--auth-tok',    default=None)                    # LLM API key (overrides .env)
+    ap.add_argument('--auth-tok',    default=None)                    # LLM API key (overrides .env and --auth-file)
+    ap.add_argument('--auth-file',   default=None)                    # LLM API key file (overrides .env)
     ap.add_argument('--provider',    default=None)                    # openai | gemini | claude (overrides .env)
     ap.add_argument('--file1-uuid',  default=None)                    # Istari artifact UUID for Company A
     ap.add_argument('--file1-rev',   default=None)                    # Istari revision ID for Company A
@@ -86,7 +87,13 @@ def main():
     }
     provider       = args.provider or os.getenv('LLM_PROVIDER', 'openai')  # .env: LLM_PROVIDER
     env_key, model = PROVIDERS[provider]                                    # unpack key name + model for chosen provider
-    token          = args.auth_tok or os.getenv(env_key, '')                # .env: OPENAI_API_KEY / GEMINI_API_KEY / CLAUDE_API_KEY
+    if args.auth_tok:
+        token = args.auth_tok
+    elif args.auth_file:
+        tok_json = json.loads(Path(args.auth_file).read_text())
+        token = tok_json['token']
+    else:
+        token = s.getenv(env_key, '') # .env: OPENAI_API_KEY / GEMINI_API_KEY / CLAUDE_API_KEY
 
     # Read inputs
     system    = (Path(__file__).parent / 'system_prompt.txt').read_text().strip()
