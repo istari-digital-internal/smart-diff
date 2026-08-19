@@ -69,10 +69,6 @@ def main():
     ap.add_argument('--auth-tok',    default=None)                    # LLM API key (overrides .env and --auth-file)
     ap.add_argument('--auth-file',   default=None)                    # LLM API key file (overrides .env)
     ap.add_argument('--provider',    default=None)                    # openai | gemini | claude (overrides .env)
-    ap.add_argument('--file1-uuid',  default=None)                    # Istari artifact UUID for Company A
-    ap.add_argument('--file1-rev',   default=None)                    # Istari revision ID for Company A
-    ap.add_argument('--file2-uuid',  default=None)                    # Istari artifact UUID for Company B
-    ap.add_argument('--file2-rev',   default=None)                    # Istari revision ID for Company B
     ap.add_argument('--output',      default='diff_output.html')      # output HTML filename
     args = ap.parse_args()
 
@@ -99,8 +95,6 @@ def main():
     system    = (Path(__file__).parent / 'system_prompt.txt').read_text().strip()
     prompt    = args.prompt.strip()
     filename1, filename2 = Path(args.diff_file1).name, Path(args.diff_file2).name  # filenames used as report labels
-    uuid1, rev1 = (args.file1_uuid or ''), (args.file1_rev or '')  # Istari artifact UUID and revision for Company A
-    uuid2, rev2 = (args.file2_uuid or ''), (args.file2_rev or '')  # Istari artifact UUID and revision for Company B
     f1, f2    = read_file(args.diff_file1), read_file(args.diff_file2)
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -110,10 +104,10 @@ def main():
 
 User focus: {prompt}
 
---- Document 1 | {filename1} | UUID: {uuid1} | Revision: {rev1} ---
+--- Document 1 | {filename1} ---
 {f1}
 
---- Document 2 | {filename2} | UUID: {uuid2} | Revision: {rev2} ---
+--- Document 2 | {filename2} ---
 {f2}""")
     diff = json.loads(raw.strip().lstrip('`json\n').rstrip('`'))  # strip backticks the LLM sometimes adds around JSON
 
@@ -123,7 +117,6 @@ User focus: {prompt}
         (Path(__file__).parent / 'html' / 'report_template.html')
         .read_text()).substitute(
         filename1=filename1, filename2=filename2,
-        uuid1=uuid1, rev1=rev1, uuid2=uuid2, rev2=rev2,
         provider=provider, model=model, timestamp=timestamp,
         matches_html  = ''.join(f'<li>{m}</li>' for m in diff['matches']),
         conflicts_html= ''.join(
