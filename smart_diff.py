@@ -36,14 +36,14 @@ PROVIDERS = {
     'gemini': {
         'env_key':   'GEMINI_API_KEY',
         'env_model': 'GEMINI_MODEL',
-        'models':    ('gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash',
-                      'gemini-2.5-pro', 'gemini-2.5-flash'),
+        'models':    ('1.5-pro', '1.5-flash', '2.0-flash',
+                      '2.5-pro', '2.5-flash'),
     },
     'claude': {
         'env_key':   'CLAUDE_API_KEY',
         'env_model': 'CLAUDE_MODEL',
-        'models':    ('claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7',
-                      'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-haiku-4-5'),
+        'models':    ('opus-5', 'opus-4.8', 'opus-4.7',
+                      'sonnet-5', 'sonnet-4.6', 'haiku-4.5'),
     },
 }
 
