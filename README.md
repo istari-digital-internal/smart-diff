@@ -38,25 +38,43 @@ pip install python-dotenv openai google-generativeai anthropic pdfplumber openpy
 
 ```bash
 python3 smart_diff.py \
-  --prompt-file examples/prompt_example.txt \
+  --prompt      "Focus on signal timing and voltage tolerances" \
   --diff-file1  examples/Warthrop_ICD_Rev3.pdf \
-  --diff-file2  examples/SpecificAtomics_ICD_v2.docx \
-  --file1-id   "a3f2c891-7d4e-4b1a-9f6c-2e8d5a0b3c7f Rev3" \
-  --file2-id   "b7e1d452-3c8f-4a9b-8e2d-1f6a9c0d4b5e v2"
+  --diff-file2  examples/SpecificAtomics_ICD_v2.docx
 ```
 
 ### All Arguments
 
 | Argument | Required | Description |
 |---|---|---|
-| `--prompt-file` | Yes | Path to the user focus prompt (.txt or .docx) |
+| `--prompt` | Yes | User focus prompt for this comparison |
 | `--diff-file1` | Yes | Path to Company A ICD (PDF, DOCX, XLSX, TXT) |
 | `--diff-file2` | Yes | Path to Company B ICD (PDF, DOCX, XLSX, TXT) |
-| `--file1-id` | No | Artifact UUID + revision for file1 (shown in report trace) |
-| `--file2-id` | No | Artifact UUID + revision for file2 (shown in report trace) |
 | `--provider` | No | `openai`, `gemini`, or `claude` (overrides .env) |
-| `--auth-tok` | No | LLM API key (overrides .env) |
+| `--model` | No | Model to use — must be one of the models available for the chosen provider (overrides .env) |
+| `--list-models` | No | Print the available models for each provider and exit |
+| `--auth-tok` | No | LLM API key (overrides .env and `--auth-file`) |
+| `--auth-file` | No | JSON file with a `token` field holding the LLM API key (overrides .env) |
 | `--output` | No | Output HTML filename (default: `diff_output.html`) |
+
+### Models
+
+The model is resolved as `--model` → `<PROVIDER>_MODEL` in `.env` → the provider's
+default (first in each list below), and is validated against the provider's list.
+An unknown model exits with the valid options for that provider.
+
+| Provider | Available models |
+|---|---|
+| `openai` | `gpt-4o` (default), `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4-turbo`, `o3`, `o4-mini` |
+| `gemini` | `gemini-1.5-pro` (default), `gemini-1.5-flash`, `gemini-2.0-flash`, `gemini-2.5-pro`, `gemini-2.5-flash` |
+| `claude` | `claude-opus-5` (default), `claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
+
+These lists live in the `PROVIDERS` dict at the top of `smart_diff.py` — add a model
+there and it becomes valid everywhere (CLI, `.env`, `--list-models`).
+
+```bash
+python3 smart_diff.py --provider claude --model claude-sonnet-5 ...
+```
 
 ---
 
@@ -76,7 +94,7 @@ LLM_PROVIDER=openai         # openai | gemini | claude
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=
 CLAUDE_API_KEY=
-OPENAI_MODEL=gpt-4o         # optional overrides
+OPENAI_MODEL=gpt-4o         # optional overrides — see Models above for valid values
 GEMINI_MODEL=gemini-1.5-pro
-CLAUDE_MODEL=claude-opus-4-8
+CLAUDE_MODEL=claude-opus-5
 ```
