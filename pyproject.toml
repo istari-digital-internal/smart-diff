@@ -14,6 +14,7 @@ claude = "*"
 openpyxl = "*"
 pdfplumber = "*"
 python-docx = "*"
+pillow = "12.3.0"
 
 [tool.poe.tasks]
 build = "pyinstaller --clean --onefile --add-data system_prompt.txt:. --add-data html/report_template.html:html --name=smart_diff smart_diff.py"
