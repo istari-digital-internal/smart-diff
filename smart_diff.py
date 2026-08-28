@@ -247,4 +247,22 @@ User focus: {prompt}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except requests.exceptions.Timeout:
+        message = f"LLM request timed out after {REQUEST_TIMEOUT_S}s"
+    except requests.exceptions.SSLError:
+        message = "TLS certificate verification failed for the LLM endpoint"
+    except requests.exceptions.ConnectionError:
+        message = "Could not connect to LLM endpoint"
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else "unknown"
+        message = f"LLM endpoint returned HTTP status {code}"
+    except (ValueError, json.JSONDecodeError):
+        message = "Error parsing JSON response from LLM"
+    except RuntimeError as e:
+        message = str(e)
+    except OSError as e:
+        message = f"{e.strerror}: {e.filename}"
+    print(f"smart_diff: error: {message}", file=sys.stderr)
+    sys.exit(1)
