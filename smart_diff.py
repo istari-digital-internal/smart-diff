@@ -258,7 +258,7 @@ if __name__ == "__main__":
     except requests.exceptions.HTTPError as e:
         code = e.response.status_code if e.response is not None else "unknown"
         message = f"LLM endpoint returned HTTP status {code}"
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError, KeyError, IndexError, TypeError):
         message = "Error parsing JSON response from LLM"
     except RuntimeError as e:
         message = str(e)
