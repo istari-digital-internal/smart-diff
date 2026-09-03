@@ -5,12 +5,10 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11,<3.13"
-dotenv = "*"
+python-dotenv = "*"
 requests = "2.33.0"
 poethepoet = "0.37.0"
 pyinstaller = "6.16.0"
-openai = "*"
-claude = "*"
 openpyxl = "*"
 pdfplumber = "*"
 python-docx = "*"

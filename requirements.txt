@@ -1,7 +1,5 @@
 python-dotenv
-openai
-google-generativeai
-anthropic
+requests
 pdfplumber
 openpyxl
 python-docx
