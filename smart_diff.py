@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import argparse, os, json
 from pathlib import Path
 from string import Template
@@ -52,6 +53,12 @@ PROVIDERS = {
         'models':    ('opus-5', 'opus-4.8', 'opus-4.7',
                       'sonnet-5', 'sonnet-4.6', 'haiku-4.5'),
     },
+    'bedrock': {
+        'base_url': 'https://bedrock-runtime.{region}.amazonaws.com',
+        'env_key':   'BEDROCK_API_KEY',
+        'env_model': 'BEDROCK_MODEL',
+        'models':    ('opus-5',),
+    },
 }
 
 REQUEST_TIMEOUT_S = 300
@@ -100,6 +107,32 @@ def read_file(p):
         from docx import Document
         return '\n'.join(para.text for para in Document(p).paragraphs if para.text.strip())
     return Path(p).read_text(errors='replace')                  # fallback: plain text (.txt, .csv, etc.)
+
+def _sigv4_headers(url, region, payload, access_key, secret_key, session_token=None):
+    # AWS Signature Version 4 for a single POST request, standard library only.
+    parsed = urllib.parse.urlparse(url)
+    now = datetime.now(timezone.utc)
+    amz_date, date_stamp = now.strftime('%Y%m%dT%H%M%SZ'), now.strftime('%Y%m%d')
+    payload_hash = hashlib.sha256(payload.encode()).hexdigest()
+    headers = {'host': parsed.netloc, 'x-amz-date': amz_date, 'x-amz-content-sha256': payload_hash}
+    if session_token:
+        headers['x-amz-security-token'] = session_token
+    signed = ';'.join(sorted(headers))
+    canonical = '\n'.join(['POST', urllib.parse.quote(parsed.path or '/'), '',
+                           ''.join(f'{k}:{headers[k]}\n' for k in sorted(headers)), signed, payload_hash])
+    scope = f'{date_stamp}/{region}/bedrock/aws4_request'
+    to_sign = '\n'.join(['AWS4-HMAC-SHA256', amz_date, scope,
+                         hashlib.sha256(canonical.encode()).hexdigest()])
+    key = ('AWS4' + secret_key).encode()
+    for part in (date_stamp, region, 'bedrock', 'aws4_request'):
+        key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+    sig = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+    out = {'X-Amz-Date': amz_date, 'X-Amz-Content-Sha256': payload_hash,
+           'Authorization': f'AWS4-HMAC-SHA256 Credential={access_key}/{scope}, '
+                            f'SignedHeaders={signed}, Signature={sig}'}
+    if session_token:
+        out['X-Amz-Security-Token'] = session_token
+    return out
 
 def _chat_completions(base, token, model, system, msg):
     # OpenAI-compatible chat completions shape.
@@ -156,6 +189,31 @@ def call_llm(provider, token, model, system, msg):
                              timeout=REQUEST_TIMEOUT_S)
         resp.raise_for_status()
         return ''.join(b.get('text', '') for b in resp.json()['content'])
+
+    if provider == 'bedrock':
+        
+        # Load AWS config from environment
+        region = os.getenv('BEDROCK_REGION', 'us-gov-west-1')
+        aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID', '')
+        aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+        aws_session_token = os.getenv('AWS_SESSION_TOKEN')
+
+        # BEDROCK_ENDPOINT (e.g. FIPS or VPC endpoint) overrides the regional default.
+        base_url = os.getenv('BEDROCK_ENDPOINT', base_url.format(region=region)).rstrip('/')
+        url = f'{base_url}/model/{urllib.parse.quote(model, safe="")}/converse'
+        payload = json.dumps({'system': [{'text': system}],
+                              'messages': [{'role': 'user', 'content': [{'text': msg}]}],
+                              'inferenceConfig': {'temperature': 0, 'maxTokens': 16000}})
+        headers = {'Content-Type': 'application/json'}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'                 # Bedrock API key
+        else:
+            headers.update(_sigv4_headers(url, region, payload,          # or AWS role credentials
+                aws_access_key_id, aws_secret_access_key,
+                aws_session_token or None))
+        resp = requests.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT_S)
+        resp.raise_for_status()
+        return ''.join(b.get('text', '') for b in resp.json()['output']['message']['content'])
 
     raise SystemExit(f'error: unsupported provider {provider!r}')
 
