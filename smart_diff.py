@@ -1,7 +1,11 @@
+import hashlib
+import hmac
 import argparse, os, json
 from pathlib import Path
 from string import Template
-from datetime import datetime
+from datetime import datetime, timezone
+import requests
+import urllib.parse
 from dotenv import load_dotenv
 
 # ── .env configuration ────────────────────────────────────────────────────────
@@ -26,26 +30,38 @@ from dotenv import load_dotenv
 #   models    — the only models accepted for this provider; --model is validated
 #               against this tuple, first entry is the default
 # Adding a new model is a one-line change here; nothing else needs to know.
+# TODO: Configure models per environment/deployment. Some are unsupported in current LLM provider versions, like gemini-1.5-pro
 PROVIDERS = {
     'openai': {
+        'base_url': 'https://api.openai.com/v1',
         'env_key':   'OPENAI_API_KEY',
         'env_model': 'OPENAI_MODEL',
         'models':    ('gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini',
                       'gpt-4-turbo', 'o3', 'o4-mini'),
     },
     'gemini': {
+        'base_url': 'https://generativelanguage.googleapis.com/v1beta/models/',
         'env_key':   'GEMINI_API_KEY',
         'env_model': 'GEMINI_MODEL',
         'models':    ('1.5-pro', '1.5-flash', '2.0-flash',
-                      '2.5-pro', '2.5-flash'),
+                      '2.5-pro', '2.5-flash', '3.6-flash'),
     },
     'claude': {
+        'base_url': 'https://api.anthropic.com/v1/messages',
         'env_key':   'CLAUDE_API_KEY',
         'env_model': 'CLAUDE_MODEL',
         'models':    ('opus-5', 'opus-4.8', 'opus-4.7',
                       'sonnet-5', 'sonnet-4.6', 'haiku-4.5'),
     },
+    'bedrock': {
+        'base_url': 'https://bedrock-runtime.{region}.amazonaws.com',
+        'env_key':   'BEDROCK_API_KEY',
+        'env_model': 'BEDROCK_MODEL',
+        'models':    ('opus-5',),
+    },
 }
+
+REQUEST_TIMEOUT_S = 300
 
 def default_model(provider):
     # First model listed for a provider is its default.
@@ -92,6 +108,44 @@ def read_file(p):
         return '\n'.join(para.text for para in Document(p).paragraphs if para.text.strip())
     return Path(p).read_text(errors='replace')                  # fallback: plain text (.txt, .csv, etc.)
 
+def _sigv4_headers(url, region, payload, access_key, secret_key, session_token=None):
+    # AWS Signature Version 4 for a single POST request, standard library only.
+    parsed = urllib.parse.urlparse(url)
+    now = datetime.now(timezone.utc)
+    amz_date, date_stamp = now.strftime('%Y%m%dT%H%M%SZ'), now.strftime('%Y%m%d')
+    payload_hash = hashlib.sha256(payload.encode()).hexdigest()
+    headers = {'host': parsed.netloc, 'x-amz-date': amz_date, 'x-amz-content-sha256': payload_hash}
+    if session_token:
+        headers['x-amz-security-token'] = session_token
+    signed = ';'.join(sorted(headers))
+    canonical = '\n'.join(['POST', urllib.parse.quote(parsed.path or '/'), '',
+                           ''.join(f'{k}:{headers[k]}\n' for k in sorted(headers)), signed, payload_hash])
+    scope = f'{date_stamp}/{region}/bedrock/aws4_request'
+    to_sign = '\n'.join(['AWS4-HMAC-SHA256', amz_date, scope,
+                         hashlib.sha256(canonical.encode()).hexdigest()])
+    key = ('AWS4' + secret_key).encode()
+    for part in (date_stamp, region, 'bedrock', 'aws4_request'):
+        key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+    sig = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+    out = {'X-Amz-Date': amz_date, 'X-Amz-Content-Sha256': payload_hash,
+           'Authorization': f'AWS4-HMAC-SHA256 Credential={access_key}/{scope}, '
+                            f'SignedHeaders={signed}, Signature={sig}'}
+    if session_token:
+        out['X-Amz-Security-Token'] = session_token
+    return out
+
+def _chat_completions(base, token, model, system, msg):
+    # OpenAI-compatible chat completions shape.
+    payload = json.dumps({'model': model, 'temperature': 0,
+                          'messages': [{'role': 'system', 'content': system},
+                                       {'role': 'user', 'content': msg}]})
+    resp = requests.post(f'{base.rstrip("/")}/chat/completions', data=payload,
+                         headers={'Content-Type': 'application/json',
+                                  'Authorization': f'Bearer {token}'},
+                         timeout=REQUEST_TIMEOUT_S)
+    resp.raise_for_status()
+    return resp.json()['choices'][0]['message']['content']
+
 def call_llm(provider, token, model, system, msg):
     # Calls the chosen LLM and returns the response text.
     # provider = set by --provider CLI arg or LLM_PROVIDER in .env  (e.g. 'openai', 'gemini', 'claude')
@@ -100,25 +154,67 @@ def call_llm(provider, token, model, system, msg):
     #            else the provider default — already validated against PROVIDERS by resolve_model()
     # system   = standing instructions loaded from system_prompt.txt
     # msg      = user prompt — the two file contents + user's focus for this specific run
+    if provider not in PROVIDERS:
+        raise SystemExit(f'error: no config provided for {provider!r}')
+    
+    base_url = PROVIDERS[provider]['base_url']
+
     if provider == 'openai':
-        from openai import OpenAI
-        return OpenAI(api_key=token).chat.completions.create(
-            model=model,
-            messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': msg}]
-        ).choices[0].message.content
+        return _chat_completions(base_url, token, model, system, msg)
+    
     if provider == 'gemini':
-        import google.generativeai as genai
-        genai.configure(api_key=token)                          # key must be set before model init
-        return genai.GenerativeModel(model, system_instruction=system).generate_content(msg).text
+        # Prepend 'gemini-' to format model name for URL (the gemini SDK handled this previously)
+        model = f'gemini-{model}'
+        url = (f'{base_url}'
+               f'{urllib.parse.quote(model)}:generateContent')
+        payload = json.dumps({'system_instruction': {'parts': [{'text': system}]},
+                              'contents': [{'role': 'user', 'parts': [{'text': msg}]}],
+                              'generationConfig': {'temperature': 0}})
+        resp = requests.post(url, data=payload,
+                             headers={'Content-Type': 'application/json',
+                                      'x-goog-api-key': token},
+                             timeout=REQUEST_TIMEOUT_S)
+        resp.raise_for_status()
+        return ''.join(p.get('text', '')
+                       for p in resp.json()['candidates'][0]['content']['parts'])
+
     if provider == 'claude':
-        import anthropic
-        resp = anthropic.Anthropic(api_key=token).messages.create(
-            model=model, max_tokens=16000, system=system,
-            messages=[{'role': 'user', 'content': msg}]
-        )
-        # Thinking is on by default on current models, so content[0] is not always
-        # the answer — keep only the text blocks.
-        return ''.join(b.text for b in resp.content if b.type == 'text')
+        payload = json.dumps({'model': model, 'max_tokens': 16000, 'temperature': 0,
+                              'system': system,
+                              'messages': [{'role': 'user', 'content': msg}]})
+        resp = requests.post(base_url, data=payload,
+                             headers={'Content-Type': 'application/json',
+                                      'x-api-key': token,
+                                      'anthropic-version': '2023-06-01'},
+                             timeout=REQUEST_TIMEOUT_S)
+        resp.raise_for_status()
+        return ''.join(b.get('text', '') for b in resp.json()['content'])
+
+    if provider == 'bedrock':
+        
+        # Load AWS config from environment
+        region = os.getenv('BEDROCK_REGION', 'us-gov-west-1')
+        aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID', '')
+        aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+        aws_session_token = os.getenv('AWS_SESSION_TOKEN')
+
+        # BEDROCK_ENDPOINT (e.g. FIPS or VPC endpoint) overrides the regional default.
+        base_url = os.getenv('BEDROCK_ENDPOINT', base_url.format(region=region)).rstrip('/')
+        url = f'{base_url}/model/{urllib.parse.quote(model, safe="")}/converse'
+        payload = json.dumps({'system': [{'text': system}],
+                              'messages': [{'role': 'user', 'content': [{'text': msg}]}],
+                              'inferenceConfig': {'temperature': 0, 'maxTokens': 16000}})
+        headers = {'Content-Type': 'application/json'}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'                 # Bedrock API key
+        else:
+            headers.update(_sigv4_headers(url, region, payload,          # or AWS role credentials
+                aws_access_key_id, aws_secret_access_key,
+                aws_session_token or None))
+        resp = requests.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT_S)
+        resp.raise_for_status()
+        return ''.join(b.get('text', '') for b in resp.json()['output']['message']['content'])
+
     raise SystemExit(f'error: unsupported provider {provider!r}')
 
 def main():
