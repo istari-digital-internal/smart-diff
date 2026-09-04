@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import html
 import argparse, os, json
 from pathlib import Path
 from string import Template
@@ -287,40 +288,31 @@ User focus: {prompt}
     diff = json.loads(raw.strip().lstrip('`json\n').rstrip('`'))  # strip backticks the LLM sometimes adds around JSON
 
     # Build HTML report and write both output files
+    def esc(v):
+        return html.escape(str(v))
+
     out = Path(args.output)
     out.write_text(Template(
         (Path(__file__).parent / 'html' / 'report_template.html')
         .read_text()).substitute(
-        filename1=filename1, filename2=filename2,
-        provider=provider, model=model, timestamp=timestamp,
-        matches_html  = ''.join(f'<li>{m}</li>' for m in diff['matches']),
+        filename1=esc(filename1), filename2=esc(filename2),
+        provider=esc(provider), model=esc(model), timestamp=esc(timestamp),
+        matches_html  = ''.join(f'<li>{esc(m)}</li>' for m in diff['matches']),
         conflicts_html= ''.join(
                         f'<tr style="border-bottom:1px solid #ddd">'
-                        f'<td style="padding:8px">{c["item"]}</td>'
-                        f'<td style="padding:8px">{c["value1"]}</td>'
-                        f'<td style="padding:8px">{c["value2"]}</td></tr>'
+                        f'<td style="padding:8px">{esc(c["item"])}</td>'
+                        f'<td style="padding:8px">{esc(c["value1"])}</td>'
+                        f'<td style="padding:8px">{esc(c["value2"])}</td></tr>'
                         for c in diff['conflicts']),
         missing_html  = ''.join(
-                        f'<li><b>{m["missing_from"]}</b> did not specify {m["item"]}. {m.get("detail","")}</li>'
+                        f'<li><b>{esc(m["missing_from"])}</b> did not specify {esc(m["item"])}. {esc(m.get("detail",""))}</li>'
                         for m in diff['missing']),
-        recommendation= diff['recommendation'],
+        recommendation= esc(diff['recommendation']),
     ))
     audit = out.with_name(out.stem + '_prompt.txt')   # sits beside --output, not in the cwd
     audit.write_text(f'PROMPT\n{"="*40}\n{prompt}\n\nPROVIDER: {provider}\nMODEL: {model}\n')
     print(f'Done — {out} + {audit}')
-
-    # i am not as familiar with building html from python, comments below are for my own self awareness and can be deleted
-    # out = Path(args.output)                          — sets the output file path from the --output arg
-    # Template(...).read_text()                        — loads report_template.html from the html/ folder next to this script
-    # .substitute(...)                                 — swaps every $placeholder in the template with real data
-    # filename1/filename2                              — the two filenames shown in the source of truth trace box at the top
-    # uuid1/rev1/uuid2/rev2                            — the istari artifact UUIDs and revision IDs for traceability
-    # provider/model/timestamp                         — which llm ran the diff and when it ran
-    # matches_html                                     — builds a <li> bullet for each match the llm found
-    # conflicts_html                                   — builds a <tr> table row for each conflict: item / value from file1 / value from file2
-    # missing_html                                     — builds a <li> bullet for each item one doc is missing
-    # recommendation                                   — drops the llm recommendation in as plain text
-    # Path(out.stem + '_prompt.txt').write_text(...)   — writes a second file next to the html with the prompt + model used as an audit trail
+    
 
 if __name__ == '__main__':
     try:

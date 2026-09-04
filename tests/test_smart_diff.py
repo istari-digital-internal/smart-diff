@@ -474,6 +474,41 @@ class TestMain:
             cli("--auth-tok", "tok")
         assert exc.value.code == 2
 
+    def test_llm_markup_is_escaped_in_report(self, cli, capture_post):
+        hostile = dict(VALID_DIFF,
+                       matches=["<script>alert(1)</script>"],
+                       recommendation='see <img src=x onerror="steal()">')
+        capture_post["response"] = FakeResponse(
+            {"choices": [{"message": {"content": json.dumps(hostile)}}]})
+        cli("--provider", "openai", "--auth-tok", "tok")
+
+        report = (cli.tmp_path / "out.html").read_text()
+        # the raw executable forms must be absent…
+        assert "<script>alert(1)</script>" not in report
+        assert 'onerror="steal()"' not in report
+        # …and the entity-encoded (inert, human-readable) forms present
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in report
+        assert "onerror=&quot;steal()&quot;" in report
+
+    def test_legitimate_angle_brackets_survive_as_text(self, cli, capture_post):
+        engineering = dict(VALID_DIFF,
+                           conflicts=[{"item": "voltage", "value1": "< 5V",
+                                       "value2": "5V & 28V"}])
+        capture_post["response"] = FakeResponse(
+            {"choices": [{"message": {"content": json.dumps(engineering)}}]})
+        cli("--provider", "openai", "--auth-tok", "tok")
+
+        report = (cli.tmp_path / "out.html").read_text()
+        assert "&lt; 5V" in report and "5V &amp; 28V" in report
+
+    def test_non_string_llm_values_do_not_crash_report(self, cli, capture_post):
+        odd = dict(VALID_DIFF, matches=[42, None])
+        capture_post["response"] = FakeResponse(
+            {"choices": [{"message": {"content": json.dumps(odd)}}]})
+        cli("--provider", "openai", "--auth-tok", "tok")
+        report = (cli.tmp_path / "out.html").read_text()
+        assert "<li>42</li>" in report
+
     def test_list_models_prints_table_and_exits_early(self, cli, capsys, capture_post):
         cli("--list-models")   # no token/model needed; returns before provider logic
         out = capsys.readouterr().out
