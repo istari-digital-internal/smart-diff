@@ -14,5 +14,12 @@ pdfplumber = "*"
 python-docx = "*"
 pillow = "12.3.0"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "8.4.1"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
 [tool.poe.tasks]
 build = "pyinstaller --clean --onefile --add-data system_prompt.txt:. --add-data html/report_template.html:html --name=smart_diff smart_diff.py"

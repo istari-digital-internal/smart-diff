@@ -208,10 +208,13 @@ def call_llm(provider, token, model, system, msg):
         headers = {'Content-Type': 'application/json'}
         if token:
             headers['Authorization'] = f'Bearer {token}'                 # Bedrock API key
-        else:
+        elif aws_access_key_id and aws_secret_access_key:
             headers.update(_sigv4_headers(url, region, payload,          # or AWS role credentials
                 aws_access_key_id, aws_secret_access_key,
                 aws_session_token or None))
+        else:
+            raise RuntimeError('Bedrock auth missing: pass --auth-tok or set '
+                               'AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY')
         resp = requests.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT_S)
         resp.raise_for_status()
         return ''.join(b.get('text', '') for b in resp.json()['output']['message']['content'])
