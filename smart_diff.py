@@ -12,16 +12,23 @@ from dotenv import load_dotenv
 
 # ── .env configuration ────────────────────────────────────────────────────────
 # Settings and API keys are read from the .env file in the same directory.
+# All providers are called through their REST APIs via requests; no vendor SDKs.
 #
-#   LLM_PROVIDER   = openai | gemini | claude      (which backend to use)
-#   OPENAI_API_KEY = sk-...                         (required if provider=openai)
-#   GEMINI_API_KEY = ...                            (required if provider=gemini)
-#   CLAUDE_API_KEY = ...                            (required if provider=claude)
-#   OPENAI_MODEL   = gpt-4o                         (optional — shown above is default)
-#   GEMINI_MODEL   = gemini-1.5-pro                 (optional — shown above is default)
-#   CLAUDE_MODEL   = claude-opus-5                  (optional — shown above is default)
+#   LLM_PROVIDER     = openai | gemini | claude | bedrock   (which backend to use)
+#   OPENAI_API_KEY   = sk-...                    (required if provider=openai)
+#   GEMINI_API_KEY   = ...                       (required if provider=gemini)
+#   CLAUDE_API_KEY   = ...                       (required if provider=claude)
+#   BEDROCK_API_KEY  = ...                       (bedrock bearer token; SigV4 via
+#                                                 AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+#                                                 [/AWS_SESSION_TOKEN] when unset)
+#   OPENAI_MODEL / GEMINI_MODEL / CLAUDE_MODEL / BEDROCK_MODEL
+#                    — optional overrides; must be in that provider's PROVIDERS
+#                      list below (gemini names get a 'gemini-' prefix at call time)
+#   BEDROCK_REGION   = us-gov-west-1             (bedrock only — shown is default)
+#   BEDROCK_ENDPOINT =                           (bedrock only — optional FIPS/VPC
+#                                                 endpoint override)
 #
-# CLI flags --provider, --model and --auth-tok override .env values if provided.
+# CLI flags --provider, --model, --auth-tok and --auth-file override .env values.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Provider registry ─────────────────────────────────────────────────────────
